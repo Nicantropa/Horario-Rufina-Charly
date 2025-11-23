@@ -1,274 +1,375 @@
 import streamlit as st
 import pandas as pd
 import io
-from datetime import datetime
+from datetime import datetime, time
+from typing import List, Dict, Optional, Any
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Doña Rufina Planificador", layout="wide")
+# ==============================================================================
+# 1. CONFIGURACIÓN Y CONSTANTES (DATA LAYER)
+# ==============================================================================
 
-# --- 1. DATOS MAESTROS (Estado Inicial) ---
-TURNOS = {
-    "Mañana": {"inicio": "08:30", "fin": "16:30"},
-    "Tarde":  {"inicio": "16:00", "fin": "23:59"}, # Usamos 23:59 para representar CIERRE matemáticamente
-    "Partido": {"bloque1": "12:00-16:00", "bloque2": "20:00-23:59"}
+CONFIG = {
+    "TURNOS": {
+        "Mañana": {"inicio": "08:30", "fin": "16:30"},
+        "Tarde":  {"inicio": "16:00", "fin": "23:59"}, # 23:59 = Cierre técnico
+        "Partido": {"bloque1": "12:00-16:00", "bloque2": "20:00-23:59"}
+    },
+    "DIAS": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"],
+    "ROLES_CRITICOS": ["J. Cocina", "Lavaplatos"],
+    "DEFAULT_STAFF": [
+        {"Nombre": "Olfa", "Rol": "J. Cocina", "Activo": True, "Extra": False, "Partido": False},
+        {"Nombre": "Charly", "Rol": "J. Cocina", "Activo": True, "Extra": False, "Partido": False},
+        {"Nombre": "Dieynaba", "Rol": "Lavaplatos", "Activo": True, "Extra": True, "Partido": False},
+        {"Nombre": "Miguel", "Rol": "Lavaplatos", "Activo": True, "Extra": True, "Partido": True},
+        {"Nombre": "Angel", "Rol": "Lavaplatos", "Activo": True, "Extra": True, "Partido": False},
+        {"Nombre": "José", "Rol": "Eq. General", "Activo": True, "Extra": True, "Partido": True},
+        {"Nombre": "Mohammed", "Rol": "Eq. General", "Activo": True, "Extra": False, "Partido": False},
+        {"Nombre": "Auxiliadora", "Rol": "Eq. General", "Activo": True, "Extra": False, "Partido": False},
+        {"Nombre": "Cristian", "Rol": "Eq. General", "Activo": True, "Extra": True, "Partido": False},
+        {"Nombre": "David", "Rol": "Eq. General", "Activo": True, "Extra": True, "Partido": False},
+        {"Nombre": "Adrian", "Rol": "Eq. General", "Activo": True, "Extra": False, "Partido": False},
+        {"Nombre": "José Capitán", "Rol": "Eq. General", "Activo": True, "Extra": False, "Partido": False},
+        {"Nombre": "Felesia", "Rol": "Eq. General", "Activo": False, "Extra": False, "Partido": False},
+    ]
 }
 
-# Base de datos de empleados (Tu "Oferta")
-DB_EMPLEADOS = [
-    {"Nombre": "Olfa",         "Rol": "J. Cocina",      "Activo": True, "Extra": False, "Partido": False},
-    {"Nombre": "Charly",       "Rol": "J. Cocina",      "Activo": True, "Extra": False, "Partido": False},
-    {"Nombre": "Dieynaba",     "Rol": "Lavaplatos",     "Activo": True, "Extra": True,  "Partido": False},
-    {"Nombre": "Miguel",       "Rol": "Lavaplatos",     "Activo": True, "Extra": True,  "Partido": True},
-    {"Nombre": "Angel",        "Rol": "Lavaplatos",     "Activo": True, "Extra": True,  "Partido": False},
-    {"Nombre": "José",         "Rol": "Eq. General",    "Activo": True, "Extra": True,  "Partido": True},
-    {"Nombre": "Mohammed",     "Rol": "Eq. General",    "Activo": True, "Extra": False, "Partido": False},
-    {"Nombre": "Auxiliadora",  "Rol": "Eq. General",    "Activo": True, "Extra": False, "Partido": False},
-    {"Nombre": "Cristian",     "Rol": "Eq. General",    "Activo": True, "Extra": True,  "Partido": False},
-    {"Nombre": "David",        "Rol": "Eq. General",    "Activo": True, "Extra": True,  "Partido": False},
-    {"Nombre": "Adrian",       "Rol": "Eq. General",    "Activo": True, "Extra": False, "Partido": False},
-    {"Nombre": "José Capitán", "Rol": "Eq. General",    "Activo": True, "Extra": False, "Partido": False},
-    {"Nombre": "Felesia",      "Rol": "Eq. General",    "Activo": False, "Extra": False, "Partido": False},
-]
+# ==============================================================================
+# 2. UTILIDADES Y LÓGICA (BUSINESS LOGIC LAYER)
+# ==============================================================================
 
-# --- 2. FUNCIONES DE LÓGICA ---
-
-def str_to_time(hora_str):
-    """Convierte texto 'HH:MM' a objeto time para comparar"""
-    if hora_str == "CIERRE": return datetime.strptime("23:59", "%H:%M").time()
-    try:
-        return datetime.strptime(hora_str, "%H:%M").time()
-    except:
-        return None
-
-def validar_disponibilidad(empleado, dia, turno_nombre, lista_excepciones):
-    """
-    EL CORAZÓN DEL SISTEMA (Lógica de Tipos)
-    Retorna: True (Disponible) / False (Conflicto)
-    """
-    # 1. Buscar si hay excepción para esta persona/día
-    regla = next((x for x in lista_excepciones if x["Nombre"] == empleado and x["Día"] == dia), None)
+class TimeUtils:
+    """Manejo centralizado de conversiones de tiempo."""
     
-    if not regla:
-        return True # Sin restricciones
-        
-    tipo = regla["Tipo"]
-    hora_limite = str_to_time(regla["Hora"])
+    @staticmethod
+    def str_to_time(hora_str: str) -> Optional[time]:
+        if not hora_str or hora_str == "-": return None
+        if hora_str.upper() == "CIERRE": return time(23, 59)
+        try:
+            return datetime.strptime(hora_str, "%H:%M").time()
+        except ValueError:
+            return None
 
-    # 2. Lógica según el TIPO de restricción
-    if tipo == "Día Libre Completo":
-        return False # Bloqueo total
+class ConstraintValidator:
+    """Evaluador de reglas y restricciones de disponibilidad."""
+
+    def __init__(self, excepciones: List[Dict]):
+        self.excepciones = excepciones
+
+    def validar(self, empleado: Dict, dia: str, turno_nombre: str) -> bool:
+        nombre = empleado["Nombre"]
         
-    # Definir horarios del turno a evaluar
-    inicio_turno = str_to_time(TURNOS[turno_nombre]["inicio"])
-    fin_turno = str_to_time(TURNOS[turno_nombre]["fin"])
-    
-    if tipo == "Entrada Mínima":
-        # "No puedo llegar antes de las X"
-        # Conflicto si: El turno empieza ANTES de la hora límite
-        if inicio_turno < hora_limite:
-            return False 
-            
-    if tipo == "Salida Máxima":
-        # "Me tengo que ir a las Y"
-        # Conflicto si: El turno termina DESPUÉS de la hora límite
-        if fin_turno > hora_limite:
+        # Buscar regla específica
+        regla = next((x for x in self.excepciones if x["Nombre"] == nombre and x["Día"] == dia), None)
+        
+        # Si no hay regla, está disponible
+        if not regla: 
+            return True
+
+        tipo = regla["Tipo"]
+        hora_limite_str = regla.get("Hora", "-")
+        hora_limite = TimeUtils.str_to_time(hora_limite_str)
+
+        # Regla 1: Bloqueo Total
+        if tipo == "Día Libre Completo":
             return False
-            
-    return True # Si pasa los filtros, es válido
 
-def generar_excel_descargable(df, logs):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, sheet_name='Horario', index=False)
-        pd.DataFrame(logs, columns=["Alertas"]).to_excel(writer, sheet_name='Reporte', index=False)
-    return output.getvalue()
+        # Obtener horarios del turno propuesto
+        inicio_turno = TimeUtils.str_to_time(CONFIG["TURNOS"][turno_nombre]["inicio"])
+        fin_turno = TimeUtils.str_to_time(CONFIG["TURNOS"][turno_nombre]["fin"])
 
-# --- 3. INTERFAZ: BARRA LATERAL (DEMANDA) ---
-st.sidebar.title("⚙️ Configuración")
-st.sidebar.info("Sube el Excel anterior para calcular rotación.")
-archivo = st.sidebar.file_uploader("Cargar Semana Anterior", type=["xlsx"])
+        # Regla 2: Entrada Tardía
+        if tipo == "Entrada Mínima":
+            if hora_limite and inicio_turno < hora_limite:
+                return False
 
-st.sidebar.markdown("---")
-st.sidebar.header("Objetivos de Personal")
+        # Regla 3: Salida Temprana
+        if tipo == "Salida Máxima":
+            if hora_limite and fin_turno > hora_limite:
+                return False
 
-# Sliders dobles
-st.sidebar.subheader("Lunes a Jueves")
-obj_lj_m = st.sidebar.slider("Mañana (L-J)", 1, 6, 3)
-obj_lj_t = st.sidebar.slider("Tarde (L-J)", 1, 8, 4)
+        return True
 
-st.sidebar.subheader("Viernes a Domingo")
-obj_vd_m = st.sidebar.slider("Mañana (V-D)", 1, 8, 4)
-obj_vd_t = st.sidebar.slider("Tarde (V-D)", 1, 10, 6)
+class SchedulerEngine:
+    """Motor principal de generación de horarios."""
 
-# --- 4. INTERFAZ: PRINCIPAL (OFERTA) ---
-st.title("👨‍🍳 Planificador Doña Rufina")
+    def __init__(self, staff: List[Dict], excepciones: List[Dict], objetivos: Dict):
+        self.staff = staff
+        self.validator = ConstraintValidator(excepciones)
+        self.objetivos = objetivos
+        self.dias = CONFIG["DIAS"]
+        self.logs = []
+        self.schedule = [] # Lista plana de asignaciones
+        self.kpi_data = []
 
-col_izq, col_der = st.columns([1.5, 1])
+    def run(self):
+        """Ejecuta el algoritmo de asignación."""
+        for dia in self.dias:
+            self._procesar_dia(dia)
+        return pd.DataFrame(self.schedule), pd.DataFrame(self.kpi_data), self.logs
 
-with col_izq:
-    st.subheader("1. Equipo Disponible")
-    # Tabla Editable
-    df_empleados = pd.DataFrame(DB_EMPLEADOS)
-    df_editado = st.data_editor(
-        df_empleados,
-        column_config={
-            "Activo": st.column_config.CheckboxColumn("¿Está?", width="small"),
-            "Rol": st.column_config.SelectboxColumn("Rol Base", options=["J. Cocina", "Lavaplatos", "Eq. General"]),
-            "Extra": st.column_config.CheckboxColumn("Acepta Extras?"),
-            "Partido": st.column_config.CheckboxColumn("Acepta Partido?"),
-        },
-        disabled=["Nombre"],
-        hide_index=True,
-        num_rows="dynamic"
-    )
-
-with col_der:
-    st.subheader("2. Excepciones (Tipos)")
-    if 'excepciones' not in st.session_state: st.session_state.excepciones = []
-    
-    with st.expander("📍 Añadir Restricción", expanded=True):
-        with st.form("form_restricciones"):
-            e_nom = st.selectbox("Trabajador", df_editado["Nombre"].unique())
-            e_dia = st.selectbox("Día", ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"])
-            # AQUÍ ESTÁ TU LÓGICA DE TIPOS
-            e_tipo = st.selectbox("Tipo de Problema", ["Día Libre Completo", "Entrada Mínima", "Salida Máxima"])
-            e_hora = st.text_input("Hora Límite (HH:MM)", placeholder="Ej: 11:00 (Solo si aplica)")
-            
-            if st.form_submit_button("Guardar Regla"):
-                st.session_state.excepciones.append({
-                    "Nombre": e_nom, "Día": e_dia, "Tipo": e_tipo, 
-                    "Hora": e_hora if e_tipo != "Día Libre Completo" else "-"
-                })
-                st.success("Regla añadida")
-
-    if st.session_state.excepciones:
-        st.write("Reglas Activas:")
-        st.dataframe(pd.DataFrame(st.session_state.excepciones), hide_index=True)
-        if st.button("Borrar Todo"):
-            st.session_state.excepciones = []
-            st.rerun()
-
-# --- 5. ALGORITMO DE GENERACIÓN ---
-st.markdown("---")
-if st.button("🚀 CALCULAR HORARIO", type="primary"):
-    
-    resultados = []
-    logs = []
-    dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-    
-    # Preparamos listas de personal según dataframe editado
-    staff = df_editado[df_editado["Activo"] == True].to_dict('records')
-    
-    for dia in dias:
-        # 1. Definir objetivo numérico del día
+    def _procesar_dia(self, dia: str):
+        # 1. Definir metas
         es_finde = dia in ["Viernes", "Sábado", "Domingo"]
-        meta_manana = obj_vd_m if es_finde else obj_lj_m
-        meta_tarde = obj_vd_t if es_finde else obj_lj_t
+        meta_m = self.objetivos["VD_M"] if es_finde else self.objetivos["LJ_M"]
+        meta_t = self.objetivos["VD_T"] if es_finde else self.objetivos["LJ_T"]
+
+        # 2. Filtrar Pool Disponible (Quien no tiene Día Libre Total)
+        pool = [e for e in self.staff if self.validator.validar(e, dia, "Mañana") or self.validator.validar(e, dia, "Tarde")]
         
         asignados_m = []
         asignados_t = []
-        
-        # Pool de gente disponible (que no tenga Día Libre Completo hoy)
-        pool_dia = [e for e in staff if validar_disponibilidad(e["Nombre"], dia, "Mañana", st.session_state.excepciones) or validar_disponibilidad(e["Nombre"], dia, "Tarde", st.session_state.excepciones)]
-        
-        # --- PASO A: ROLES CRÍTICOS (Jefe y Lava) ---
-        for turno, lista_asignados in [("Mañana", asignados_m), ("Tarde", asignados_t)]:
-            # Buscamos Jefe
-            candidatos_jefe = [e for e in pool_dia if e["Rol"] == "J. Cocina" and e not in asignados_m + asignados_t]
-            for c in candidatos_jefe:
-                if validar_disponibilidad(c["Nombre"], dia, turno, st.session_state.excepciones):
-                    lista_asignados.append(c)
-                    break # Ya tenemos 1 jefe
-            
-            # Buscamos Lavaplatos
-            candidatos_lava = [e for e in pool_dia if e["Rol"] == "Lavaplatos" and e not in asignados_m + asignados_t]
-            for c in candidatos_lava:
-                if validar_disponibilidad(c["Nombre"], dia, turno, st.session_state.excepciones):
-                    lista_asignados.append(c)
-                    break # Ya tenemos 1 lava
 
-        # --- PASO B: RELLENO (Equipo General) ---
-        # Llenar Mañana
-        while len(asignados_m) < meta_manana:
-            # Priorizamos Eq General, luego lo que sobre
-            candidatos = [e for e in pool_dia if e not in asignados_m + asignados_t]
-            if not candidatos: break
-            
-            seleccionado = None
-            for c in candidatos:
-                if validar_disponibilidad(c["Nombre"], dia, "Mañana", st.session_state.excepciones):
-                    seleccionado = c
-                    break
-            
-            if seleccionado: asignados_m.append(seleccionado)
-            else: break
-            
-        # Llenar Tarde
-        while len(asignados_t) < meta_tarde:
-            candidatos = [e for e in pool_dia if e not in asignados_m + asignados_t]
-            if not candidatos: break
-            
-            seleccionado = None
-            for c in candidatos:
-                if validar_disponibilidad(c["Nombre"], dia, "Tarde", st.session_state.excepciones):
-                    seleccionado = c
-                    break
-            
-            if seleccionado: asignados_t.append(seleccionado)
-            else: break
-            
-        # --- PASO C: GESTIÓN DE DÉFICIT (Extras y Partidos) ---
-        falta_m = meta_manana - len(asignados_m)
-        falta_t = meta_tarde - len(asignados_t)
+        # --- FASE 1: ROLES CRÍTICOS ---
+        self._asignar_rol_critico(dia, "Mañana", pool, asignados_m, asignados_t)
+        self._asignar_rol_critico(dia, "Tarde", pool, asignados_m, asignados_t) # Nota: Corregido para usar listas separadas si es necesario
+
+        # --- FASE 2: RELLENO GENERAL ---
+        self._rellenar_turno(dia, "Mañana", meta_m, pool, asignados_m, asignados_t)
+        self._rellenar_turno(dia, "Tarde", meta_t, pool, asignados_m, asignados_t)
+
+        # --- FASE 3: RECUPERACIÓN (Extras y Partidos) ---
+        self._gestionar_deficit(dia, meta_m, meta_t, pool, asignados_m, asignados_t)
+
+        # --- GUARDAR RESULTADOS ---
+        for p in asignados_m:
+            self.schedule.append({"Día": dia, "Turno": "Mañana", "Horario": "08:30-16:30", "Nombre": p["Nombre"], "Rol": p["Rol"]})
+        for p in asignados_t:
+            self.schedule.append({"Día": dia, "Turno": "Tarde", "Horario": "16:00-CIERRE", "Nombre": p["Nombre"], "Rol": p["Rol"]})
+
+        # --- KPIS ---
+        self.kpi_data.append({
+            "Día": dia,
+            "Meta M": meta_m, "Real M": len(asignados_m), "Gap M": len(asignados_m) - meta_m,
+            "Meta T": meta_t, "Real T": len(asignados_t), "Gap T": len(asignados_t) - meta_t
+        })
+
+    def _asignar_rol_critico(self, dia, turno_nom, pool, asig_m, asig_t):
+        target_list = asig_m if turno_nom == "Mañana" else asig_t
+        excluidos = asig_m + asig_t
         
-        # 1. Intentar cubrir con HORAS EXTRA (Gente que acepta Extra y no está asignada)
+        for rol in CONFIG["ROLES_CRITICOS"]:
+            candidatos = [e for e in pool if e["Rol"] == rol and e not in excluidos]
+            for c in candidatos:
+                if self.validator.validar(c, dia, turno_nom):
+                    target_list.append(c)
+                    break # Solo 1 por rol crítico
+
+    def _rellenar_turno(self, dia, turno_nom, meta, pool, asig_m, asig_t):
+        target_list = asig_m if turno_nom == "Mañana" else asig_t
+        
+        while len(target_list) < meta:
+            excluidos = asig_m + asig_t
+            # Prioridad: Eq General -> Luego cualquiera disponible
+            candidatos = [e for e in pool if e not in excluidos]
+            if not candidatos: break
+            
+            seleccionado = None
+            for c in candidatos:
+                if self.validator.validar(c, dia, turno_nom):
+                    seleccionado = c
+                    break
+            
+            if seleccionado: target_list.append(seleccionado)
+            else: break
+
+    def _gestionar_deficit(self, dia, meta_m, meta_t, pool, asig_m, asig_t):
+        falta_m = meta_m - len(asig_m)
+        falta_t = meta_t - len(asig_t)
+
+        # 1. Horas Extra
         if falta_m > 0 or falta_t > 0:
-            libres = [e for e in pool_dia if e not in asignados_m + asignados_t and e["Extra"] == True]
-            for l in libres:
-                if falta_m > 0 and validar_disponibilidad(l["Nombre"], dia, "Mañana", st.session_state.excepciones):
-                    asignados_m.append(l); falta_m -= 1; logs.append(f"⚠️ {dia}: {l['Nombre']} hace Horas Extra (Mañana)")
-                elif falta_t > 0 and validar_disponibilidad(l["Nombre"], dia, "Tarde", st.session_state.excepciones):
-                    asignados_t.append(l); falta_t -= 1; logs.append(f"⚠️ {dia}: {l['Nombre']} hace Horas Extra (Tarde)")
-        
-        # 2. Último Recurso: TURNO PARTIDO (Gente que acepta Partido y está libre)
-        if falta_m > 0 and falta_t > 0: # Solo si falta en AMBOS lados tiene sentido el partido para cubrir huecos
-            partidos = [e for e in pool_dia if e not in asignados_m + asignados_t and e["Partido"] == True]
+            extras = [e for e in pool if e["Extra"] and e not in asig_m + asig_t]
+            for e in extras:
+                if falta_m > 0 and self.validator.validar(e, dia, "Mañana"):
+                    asig_m.append(e)
+                    falta_m -= 1
+                    self.logs.append(f"⚠️ {dia}: {e['Nombre']} asignado H. Extra (Mañana)")
+                elif falta_t > 0 and self.validator.validar(e, dia, "Tarde"):
+                    asig_t.append(e)
+                    falta_t -= 1
+                    self.logs.append(f"⚠️ {dia}: {e['Nombre']} asignado H. Extra (Tarde)")
+
+        # 2. Turno Partido
+        if falta_m > 0 and falta_t > 0:
+            partidos = [e for e in pool if e["Partido"] and e not in asig_m + asig_t]
             for p in partidos:
-                # Verificar que no tenga restricción horaria que impida el partido
-                # (Simplificamos: Si tiene restricción horaria, no hace partido por seguridad)
-                if validar_disponibilidad(p["Nombre"], dia, "Mañana", st.session_state.excepciones) and \
-                   validar_disponibilidad(p["Nombre"], dia, "Tarde", st.session_state.excepciones):
+                # Validar disponibilidad en AMBOS turnos
+                if self.validator.validar(p, dia, "Mañana") and self.validator.validar(p, dia, "Tarde"):
                     p_copy = p.copy()
-                    p_copy["Rol"] = str(p["Rol"]) + " (PARTIDO)"
-                    asignados_m.append(p_copy)
-                    asignados_t.append(p_copy)
+                    p_copy["Rol"] = f"{p['Rol']} (PARTIDO)"
+                    asig_m.append(p_copy)
+                    asig_t.append(p_copy)
                     falta_m -= 1
                     falta_t -= 1
-                    logs.append(f"🔄 {dia}: {p['Nombre']} asignado a Turno Partido.")
+                    self.logs.append(f"🔄 {dia}: {p['Nombre']} cubre Turno Partido.")
 
-        # Guardar en lista final
-        for x in asignados_m: resultados.append({"Día": dia, "Turno": "Mañana", "Horario": "08:30-16:30", "Nombre": x["Nombre"], "Rol": x["Rol"]})
-        for x in asignados_t: resultados.append({"Día": dia, "Turno": "Tarde", "Horario": "16:00-CIERRE", "Nombre": x["Nombre"], "Rol": x["Rol"]})
+class ExcelExporter:
+    """Manejo de exportación a Excel."""
+    
+    @staticmethod
+    def generate(df_matrix: pd.DataFrame, df_kpis: pd.DataFrame, logs: List[str]) -> bytes:
+        output = io.BytesIO()
+        try:
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_matrix.to_excel(writer, sheet_name='Horario Semanal')
+                df_kpis.to_excel(writer, sheet_name='Control Objetivos', index=False)
+                
+                # Formatear Logs
+                df_logs = pd.DataFrame(logs, columns=["Eventos del Sistema"])
+                df_logs.to_excel(writer, sheet_name='Logs', index=False)
+                
+                # Ajuste de columnas automático (básico)
+                workbook = writer.book
+                worksheet = writer.sheets['Horario Semanal']
+                format1 = workbook.add_format({'text_wrap': True, 'valign': 'top'})
+                worksheet.set_column('A:Z', 20, format1)
 
-    # --- 6. VISUALIZACIÓN ---
-    if resultados:
-        df_res = pd.DataFrame(resultados)
-        
-        # Vista Matricial (Pivot)
-        st.success("✅ Horario Generado")
-        
-        if logs:
-            with st.expander("Ver Reporte de Incidencias"):
-                st.write(logs)
+        except Exception as e:
+            st.error(f"Error generando Excel: {e}")
+            return b""
+            
+        return output.getvalue()
 
-        # Crear matriz visual
-        pivot = df_res.pivot_table(index=["Turno", "Horario"], columns="Día", values="Nombre", aggfunc=lambda x: ", ".join(x))
-        # Ordenar columnas correctamente
-        cols_orden = [d for d in dias if d in pivot.columns]
-        st.dataframe(pivot[cols_orden], use_container_width=True)
+# ==============================================================================
+# 3. INTERFAZ DE USUARIO (PRESENTATION LAYER)
+# ==============================================================================
+
+def main():
+    st.set_page_config(page_title="Doña Rufina Planificador", layout="wide", page_icon="🍽️")
+
+    # --- Sidebar: Configuración ---
+    st.sidebar.title("⚙️ Configuración")
+    
+    st.sidebar.markdown("### 🎯 Objetivos Lunes-Jueves")
+    col_lj1, col_lj2 = st.sidebar.columns(2)
+    obj_lj_m = col_lj1.number_input("Mañana (L-J)", 1, 10, 3)
+    obj_lj_t = col_lj2.number_input("Tarde (L-J)", 1, 10, 4)
+
+    st.sidebar.markdown("### 🎯 Objetivos Viernes-Domingo")
+    col_vd1, col_vd2 = st.sidebar.columns(2)
+    obj_vd_m = col_vd1.number_input("Mañana (V-D)", 1, 10, 4)
+    obj_vd_t = col_vd2.number_input("Tarde (V-D)", 1, 10, 6)
+
+    objetivos_dict = {
+        "LJ_M": obj_lj_m, "LJ_T": obj_lj_t,
+        "VD_M": obj_vd_m, "VD_T": obj_vd_t
+    }
+
+    # --- Main Area ---
+    st.title("🍽️ Doña Rufina Scheduler Pro")
+    
+    tab1, tab2 = st.tabs(["👥 Equipo y Restricciones", "📅 Generador de Horarios"])
+
+    # --- TAB 1: GESTIÓN DE DATOS ---
+    with tab1:
+        col_staff, col_rules = st.columns([1.5, 1])
         
-        # Botón Descarga
-        excel_bytes = generar_excel_descargable(df_res, logs)
-        st.download_button("📥 Descargar Excel", excel_bytes, "horario_semanal.xlsx")
-    else:
-        st.error("No se pudo generar horario. Revisa disponibilidades.")
+        with col_staff:
+            st.subheader("Planilla de Trabajadores")
+            df_base = pd.DataFrame(CONFIG["DEFAULT_STAFF"])
+            df_edited = st.data_editor(
+                df_base,
+                column_config={
+                    "Activo": st.column_config.CheckboxColumn("Disp.", width="small"),
+                    "Rol": st.column_config.SelectboxColumn("Rol Base", options=["J. Cocina", "Lavaplatos", "Eq. General"]),
+                },
+                disabled=["Nombre"],
+                hide_index=True,
+                num_rows="dynamic",
+                key="editor_staff"
+            )
+
+        with col_rules:
+            st.subheader("Excepciones y Permisos")
+            if 'excepciones' not in st.session_state: st.session_state.excepciones = []
+
+            with st.form("form_excep"):
+                c1, c2 = st.columns(2)
+                e_nom = c1.selectbox("Nombre", df_edited["Nombre"].unique())
+                e_dia = c2.selectbox("Día", CONFIG["DIAS"])
+                e_tipo = st.selectbox("Restricción", ["Día Libre Completo", "Entrada Mínima", "Salida Máxima"])
+                e_hora = st.text_input("Hora (HH:MM)", placeholder="Solo si aplica", help="Ej: 11:30")
+                
+                if st.form_submit_button("Añadir Regla"):
+                    st.session_state.excepciones.append({
+                        "Nombre": e_nom, "Día": e_dia, "Tipo": e_tipo, "Hora": e_hora
+                    })
+                    st.success("Regla Guardada")
+
+            if st.session_state.excepciones:
+                st.dataframe(pd.DataFrame(st.session_state.excepciones), hide_index=True, use_container_width=True)
+                if st.button("Limpiar Reglas"):
+                    st.session_state.excepciones = []
+                    st.rerun()
+
+    # --- TAB 2: GENERACIÓN ---
+    with tab2:
+        st.write("Configura el equipo en la pestaña anterior y luego genera el horario.")
+        
+        if st.button("🚀 Calcular Horario Óptimo", type="primary"):
+            # Preparar datos
+            staff_list = df_edited[df_edited["Activo"] == True].to_dict('records')
+            
+            # Instanciar Motor
+            engine = SchedulerEngine(staff_list, st.session_state.excepciones, objetivos_dict)
+            
+            # Ejecutar
+            df_schedule, df_kpis, logs = engine.run()
+
+            if not df_schedule.empty:
+                st.success("Cálculo completado con éxito.")
+                
+                # 1. Transformar a Vista Matricial (Personas x Días)
+                matrix = df_schedule.pivot_table(
+                    index="Nombre", 
+                    columns="Día", 
+                    values="Horario", 
+                    aggfunc=lambda x: " / ".join(x)
+                ).reindex(df_edited["Nombre"].unique()).fillna("LIBRE")
+                
+                # Reordenar columnas de días
+                dias_presentes = [d for d in CONFIG["DIAS"] if d in matrix.columns]
+                matrix = matrix[dias_presentes]
+
+                # 2. Visualización
+                st.subheader("📅 Vista de Horarios")
+                
+                def style_schedule(val):
+                    return 'background-color: #ffcccc; color: #333' if val == "LIBRE" else 'background-color: #e6f3ff; color: #000'
+                
+                st.dataframe(matrix.style.map(style_schedule), use_container_width=True)
+
+                # 3. KPIs
+                st.subheader("📊 Control de Cobertura")
+                
+                def style_kpi(val):
+                    if isinstance(val, (int, float)):
+                        return 'color: red; font-weight: bold' if val < 0 else 'color: green'
+                    return ''
+
+                st.dataframe(
+                    df_kpis.style.map(style_kpi, subset=["Gap M", "Gap T"]),
+                    use_container_width=True
+                )
+
+                # 4. Logs
+                if logs:
+                    with st.expander("📝 Ver Detalles y Alertas del Algoritmo"):
+                        for log in logs:
+                            st.write(log)
+
+                # 5. Descarga
+                excel_data = ExcelExporter.generate(matrix, df_kpis, logs)
+                if excel_data:
+                    st.download_button(
+                        "📥 Descargar Excel para Imprimir",
+                        data=excel_data,
+                        file_name="horario_semanal_dona_rufina.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+            else:
+                st.error("No se pudo generar el horario. Verifica que haya personal activo.")
+
+if __name__ == "__main__":
+    main()
