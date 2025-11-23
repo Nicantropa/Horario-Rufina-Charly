@@ -15,7 +15,6 @@ CONFIG = {
         "Partido": {"bloque1": "12:00-16:00", "bloque2": "20:00-23:59"}
     },
     "DIAS": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"],
-    # CORRECCIÓN: Eliminado ("Domingo", "Lunes") para forzar contigüidad visual
     "PARES_DIAS_LIBRES": [
         ("Lunes", "Martes"), 
         ("Martes", "Miércoles"), 
@@ -85,7 +84,6 @@ def asignar_dias_libres_inteligente(staff_list, excepciones, libranzas_previas):
                     if pair[0] == primer_dia_previo:
                         idx_encontrado = i; break
                 if idx_encontrado != -1:
-                    # Si antes libró Sabado-Domingo (index 5), ahora pasa a Lunes-Martes (index 0)
                     nuevo_idx = (idx_encontrado + 1) % len(pares)
                     emp["Dias_Libres_Asignados"] = list(pares[nuevo_idx])
                 else:
@@ -122,13 +120,15 @@ def validar_regla(empleado_dic, dia, turno_nombre, lista_excepciones):
     if tipo == "Salida Máxima" and hora_limite and fin_turno > hora_limite: return False
     return True
 
-def generar_excel(df_matrix, df_kpis, logs):
+def generar_excel(df_matrix, df_kpis, df_validacion, logs):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_matrix.to_excel(writer, sheet_name='Horario Semanal')
+        df_validacion.to_excel(writer, sheet_name='Auditoría Roles', index=False)
         df_kpis.to_excel(writer, sheet_name='Faltantes', index=False)
         pd.DataFrame(logs, columns=["Detalle"]).to_excel(writer, sheet_name='Logs', index=False)
         writer.sheets['Horario Semanal'].set_column('A:Z', 20)
+        writer.sheets['Auditoría Roles'].set_column('A:E', 15)
     return output.getvalue()
 
 # --- 5. INTERFAZ PRINCIPAL ---
@@ -226,8 +226,8 @@ def main():
                                 asig_m.append(p_copy); asig_t.append(p_copy)
                                 falta_m -= 1; falta_t -= 1; logs.append(f"🔄 {dia}: {p['Nombre']} (Partido)")
 
-                    for x in asig_m: schedule.append({"Día": dia, "Horario": "08:30-16:30", "Nombre": x["Nombre"]})
-                    for x in asig_t: schedule.append({"Día": dia, "Horario": "16:00-CIERRE", "Nombre": x["Nombre"]})
+                    for x in asig_m: schedule.append({"Día": dia, "Turno": "Mañana", "Horario": "08:30-16:30", "Nombre": x["Nombre"], "Rol": x["Rol"]})
+                    for x in asig_t: schedule.append({"Día": dia, "Turno": "Tarde", "Horario": "16:00-CIERRE", "Nombre": x["Nombre"], "Rol": x["Rol"]})
                     
                     gap_m = len(asig_m) - meta_m
                     gap_t = len(asig_t) - meta_t
@@ -239,6 +239,8 @@ def main():
 
                 if schedule:
                     st.success("✅ Horario Generado")
+                    
+                    # 1. Matriz
                     df_sch = pd.DataFrame(schedule)
                     matrix = df_sch.pivot_table(index="Nombre", columns="Día", values="Horario", aggfunc=lambda x: " / ".join(x))
                     matrix = matrix.reindex(df_edited["Nombre"].unique()).reindex(columns=CONFIG["DIAS"]).fillna("LIBRE")
@@ -247,6 +249,35 @@ def main():
                         return 'background-color: #ffcccc; color: #555' if "LIBRE" in str(val) else 'background-color: #e6f3ff; color: #000'
                     st.dataframe(matrix.style.map(style_cells), use_container_width=True)
                     
+                    # 2. VALIDACIÓN DE ROLES CRÍTICOS (NUEVO BLOQUE)
+                    st.subheader("🛡️ Auditoría de Roles Críticos")
+                    validacion_roles = []
+                    for dia in CONFIG["DIAS"]:
+                        # Filtrar datos de este día
+                        ops_dia = [s for s in schedule if s['Día'] == dia]
+                        
+                        # Mañana
+                        ops_m = [s for s in ops_dia if s['Turno'] == 'Mañana']
+                        has_jefe_m = any("J. Cocina" in s['Rol'] for s in ops_m)
+                        has_lava_m = any("Lavaplatos" in s['Rol'] for s in ops_m)
+                        
+                        # Tarde
+                        ops_t = [s for s in ops_dia if s['Turno'] == 'Tarde']
+                        has_jefe_t = any("J. Cocina" in s['Rol'] for s in ops_t)
+                        has_lava_t = any("Lavaplatos" in s['Rol'] for s in ops_t)
+                        
+                        validacion_roles.append({
+                            "Día": dia,
+                            "Jefe Mañana": "✅" if has_jefe_m else "❌",
+                            "Lava Mañana": "✅" if has_lava_m else "❌",
+                            "Jefe Tarde": "✅" if has_jefe_t else "❌",
+                            "Lava Tarde": "✅" if has_lava_t else "❌",
+                        })
+                    
+                    df_validacion = pd.DataFrame(validacion_roles)
+                    st.dataframe(df_validacion, use_container_width=True)
+
+                    # 3. Resumen Faltantes
                     st.subheader("⚠️ Resumen de Personal Faltante")
                     df_kpi = pd.DataFrame(kpis_simples)
                     
@@ -257,7 +288,8 @@ def main():
                     
                     st.dataframe(df_kpi.style.map(highlight_missing, subset=["Faltan Mañana", "Faltan Tarde"]), use_container_width=True)
                     
-                    excel_data = generar_excel(matrix, df_kpi, logs)
+                    # 4. Excel
+                    excel_data = generar_excel(matrix, df_kpi, df_validacion, logs)
                     st.download_button("📥 Descargar Excel", excel_data, "horario.xlsx")
                 else:
                     st.error("No se pudo generar nada. Revisa configuración.")
