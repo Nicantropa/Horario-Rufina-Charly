@@ -314,7 +314,7 @@ def main():
                 mejor_score = -float('inf')
                 
                 barra_progreso = st.progress(0)
-                num_simulaciones = 50
+                num_simulaciones = 5000
                 
                 for i in range(num_simulaciones):
                     resultado = simular_semana(staff_raw, excepciones, historial, objetivos, usar_rescate)
