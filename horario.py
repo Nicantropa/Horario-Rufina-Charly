@@ -48,17 +48,12 @@ def str_to_time(hora_str):
 def cumple_restricciones_duras(empleado, dia, turno_nombre, excepciones):
     nombre = empleado["Nombre"]
     regla = next((x for x in excepciones if x["Nombre"] == nombre and x["Día"] == dia), None)
-    
     if not regla: return True 
-
     tipo = regla["Tipo"]
     hora_limite = str_to_time(regla.get("Hora", "-"))
-    
     if tipo == "Día Libre Completo": return False
-
     inicio = str_to_time(CONFIG["TURNOS"][turno_nombre]["inicio"])
     fin = str_to_time(CONFIG["TURNOS"][turno_nombre]["fin"])
-
     if tipo == "Entrada Mínima" and hora_limite and inicio < hora_limite: return False
     if tipo == "Salida Máxima" and hora_limite and fin > hora_limite: return False
     return True
@@ -80,7 +75,7 @@ def detectar_libranza_anterior(uploaded_file):
     except Exception: return {}
     return libranzas_previas
 
-# --- 3. MOTOR DE SIMULACIÓN (UPDATED) ---
+# --- 3. MOTOR DE SIMULACIÓN ---
 
 def asignar_dias_libres_aleatorio_controlado(staff_list, excepciones, libranzas_previas):
     staff_con_libres = copy.deepcopy(staff_list)
@@ -103,7 +98,6 @@ def asignar_dias_libres_aleatorio_controlado(staff_list, excepciones, libranzas_
                 idx_encontrado = -1
                 for i, pair in enumerate(pares):
                     if pair[0] == primer_dia: idx_encontrado = i; break
-                
                 if idx_encontrado != -1:
                     nuevo_idx = (idx_encontrado + 1) % len(pares)
                     emp["Dias_Libres_Asignados"] = list(pares[nuevo_idx])
@@ -122,7 +116,7 @@ def asignar_dias_libres_aleatorio_controlado(staff_list, excepciones, libranzas_
 def simular_semana(staff_base, excepciones, libranzas_previas, objetivos, usar_rescate):
     staff_pool = asignar_dias_libres_aleatorio_controlado(staff_base, excepciones, libranzas_previas)
     
-    # Filtro Rápido: Si todos los jefes libran el mismo día, descartar
+    # Filtro de Muerte Súbita
     for dia in CONFIG["DIAS"]:
         jefes_libres = [e for e in staff_pool if e["Rol"] == "J. Cocina" and esta_en_dia_libre(e, dia)]
         total_jefes = [e for e in staff_pool if e["Rol"] == "J. Cocina"]
@@ -139,84 +133,111 @@ def simular_semana(staff_base, excepciones, libranzas_previas, objetivos, usar_r
         
         asig_m, asig_t = [], []
         
-        # --- FASE 1: ROLES CRÍTICOS ---
+        # Identificar plantilla disponible hoy (los que NO libran)
+        # A diferencia de antes, ESTA LISTA DEBE ASIGNARSE COMPLETA (si es posible)
+        trabajadores_hoy = [e for e in staff_pool if not esta_en_dia_libre(e, dia)]
+        random.shuffle(trabajadores_hoy) # Barajar para reparto equitativo
+
+        # --- FASE 1: ROLES CRÍTICOS (Prioridad Absoluta) ---
+        # Los asignamos primero a sus huecos correspondientes
         for rol in CONFIG["ROLES_CRITICOS"]:
             # Mañana
-            cands = [e for e in staff_pool if e["Rol"] == rol and e not in asig_m + asig_t and not esta_en_dia_libre(e, dia) and cumple_restricciones_duras(e, dia, "Mañana", excepciones)]
-            if cands:
-                asig_m.append(cands[0])
-                score += 1000
+            cand = next((c for c in trabajadores_hoy if c["Rol"] == rol and c not in asig_m and cumple_restricciones_duras(c, dia, "Mañana", excepciones)), None)
+            if cand:
+                asig_m.append(cand); score += 1000
             else:
+                # Intento de Rescate (Día Libre)
                 if usar_rescate:
-                    rescuables = [e for e in staff_pool if e["Rol"] == rol and e not in asig_m + asig_t and cumple_restricciones_duras(e, dia, "Mañana", excepciones)]
-                    if rescuables:
-                        asig_m.append(rescuables[0])
-                        score -= 10
-                        logs.append(f"🚨 {dia} (M): {rescuables[0]['Nombre']} recuperado ({rol})")
+                    rescuable = next((c for c in staff_pool if c["Rol"] == rol and esta_en_dia_libre(c, dia) and cumple_restricciones_duras(c, dia, "Mañana", excepciones)), None)
+                    if rescuable:
+                        asig_m.append(rescuable); score -= 10; logs.append(f"🚨 {dia} (M): {rescuable['Nombre']} recuperado ({rol})")
                     else:
                         score -= 100000; logs.append(f"❌ {dia} (M): {rol} VACANTE")
                 else:
                     score -= 100000; logs.append(f"❌ {dia} (M): {rol} VACANTE")
 
             # Tarde
-            cands_t = [e for e in staff_pool if e["Rol"] == rol and e not in asig_m + asig_t and not esta_en_dia_libre(e, dia) and cumple_restricciones_duras(e, dia, "Tarde", excepciones)]
-            if cands_t:
-                asig_t.append(cands_t[0])
-                score += 1000
+            cand_t = next((c for c in trabajadores_hoy if c["Rol"] == rol and c not in asig_t and c not in asig_m and cumple_restricciones_duras(c, dia, "Tarde", excepciones)), None)
+            if cand_t:
+                asig_t.append(cand_t); score += 1000
             else:
                 if usar_rescate:
-                    rescuables = [e for e in staff_pool if e["Rol"] == rol and e not in asig_m + asig_t and cumple_restricciones_duras(e, dia, "Tarde", excepciones)]
-                    if rescuables:
-                        asig_t.append(rescuables[0])
-                        score -= 10
-                        logs.append(f"🚨 {dia} (T): {rescuables[0]['Nombre']} recuperado ({rol})")
+                    rescuable = next((c for c in staff_pool if c["Rol"] == rol and esta_en_dia_libre(c, dia) and cumple_restricciones_duras(c, dia, "Tarde", excepciones)), None)
+                    if rescuable:
+                        asig_t.append(rescuable); score -= 10; logs.append(f"🚨 {dia} (T): {rescuable['Nombre']} recuperado ({rol})")
                     else:
                         score -= 100000; logs.append(f"❌ {dia} (T): {rol} VACANTE")
                 else:
                     score -= 100000; logs.append(f"❌ {dia} (T): {rol} VACANTE")
 
-        # --- FASE 2: RELLENO ---
-        pool_relleno = [e for e in staff_pool if not esta_en_dia_libre(e, dia)]
+        # --- FASE 2: ASIGNACIÓN TOTAL (Garantizar 5 días de trabajo) ---
+        # Recorremos a TODOS los trabajadores disponibles que aún no tienen turno hoy
+        pendientes = [e for e in trabajadores_hoy if e not in asig_m and e not in asig_t]
         
-        while len(asig_m) < meta_m:
-            c = next((x for x in pool_relleno if x not in asig_m + asig_t and cumple_restricciones_duras(x, dia, "Mañana", excepciones)), None)
-            if c: asig_m.append(c); score += 50
-            else: break
+        for p in pendientes:
+            # Decidir dónde asignar: ¿Dónde falta más gente respecto a la meta?
+            falta_m = meta_m - len(asig_m)
+            falta_t = meta_t - len(asig_t)
             
-        while len(asig_t) < meta_t:
-            c = next((x for x in pool_relleno if x not in asig_m + asig_t and cumple_restricciones_duras(x, dia, "Tarde", excepciones)), None)
-            if c: asig_t.append(c); score += 50
-            else: break
+            asignado = False
+            
+            # Prioridad: Donde haya más déficit
+            if falta_m >= falta_t:
+                # Intentar Mañana
+                if cumple_restricciones_duras(p, dia, "Mañana", excepciones):
+                    asig_m.append(p); asignado = True; score += 50
+                elif cumple_restricciones_duras(p, dia, "Tarde", excepciones):
+                    asig_t.append(p); asignado = True; score += 50
+            else:
+                # Intentar Tarde
+                if cumple_restricciones_duras(p, dia, "Tarde", excepciones):
+                    asig_t.append(p); asignado = True; score += 50
+                elif cumple_restricciones_duras(p, dia, "Mañana", excepciones):
+                    asig_m.append(p); asignado = True; score += 50
+            
+            if not asignado:
+                # Si no pudo entrar por restricción horaria, no restamos score (es inevitable)
+                pass
 
-        # --- FASE 3: EXTRAS (CORREGIDA) ---
-        falta_m, falta_t = meta_m - len(asig_m), meta_t - len(asig_t)
+        # --- FASE 3: DÉFICIT (ORDEN RESTAURADO: EXTRAS > PARTIDOS) ---
+        falta_m = meta_m - len(asig_m)
+        falta_t = meta_t - len(asig_t)
         
+        # Recuperamos a todos los disponibles (incluyendo los que ya trabajan, para doblar)
+        # NOTA: "pool_relleno" ahora son los que NO están librando.
+        pool_relleno = trabajadores_hoy
+
+        # 3.1 PRIORIDAD: EXTRAS (Simple)
         if falta_m > 0 or falta_t > 0:
-            # Aquí está la clave: Filtramos gente que ACEPTA extra, está disponible y NO ha sido asignada
-            extras = [e for e in pool_relleno if e["Extra"] and e not in asig_m + asig_t]
+            extras = [e for e in pool_relleno if e["Extra"]]
             for e in extras:
-                if falta_m > 0 and cumple_restricciones_duras(e, dia, "Mañana", excepciones):
-                    asig_m.append(e)
-                    falta_m -= 1
-                    score += 40 # ¡AQUÍ SUMAMOS PUNTOS POR USAR EXTRA! (Menos que 50, pero mucho mejor que 0)
+                # Extra Mañana (Si no está ya en mañana)
+                if falta_m > 0 and e not in asig_m and cumple_restricciones_duras(e, dia, "Mañana", excepciones):
+                    # Evitar conflicto si ya está en tarde y no es partido (pero Extra suele implicar flexibilidad)
+                    # Asumimos que Extra permite doblar turno como Hora Extra
+                    asig_m.append(e); falta_m -= 1
+                    score += 45 # Score positivo
                     logs.append(f"⚠️ {dia}: {e['Nombre']} (Extra M)")
-                elif falta_t > 0 and cumple_restricciones_duras(e, dia, "Tarde", excepciones):
-                    asig_t.append(e)
-                    falta_t -= 1
-                    score += 40 # Sumamos puntos
+                
+                # Extra Tarde
+                elif falta_t > 0 and e not in asig_t and cumple_restricciones_duras(e, dia, "Tarde", excepciones):
+                    asig_t.append(e); falta_t -= 1
+                    score += 45
                     logs.append(f"⚠️ {dia}: {e['Nombre']} (Extra T)")
-        
-        # Partidos
-        if falta_m > 0 and falta_t > 0:
-             partidos = [e for e in pool_relleno if e["Partido"] and e not in asig_m + asig_t]
-             for p in partidos:
-                 if cumple_restricciones_duras(p, dia, "Mañana", excepciones) and cumple_restricciones_duras(p, dia, "Tarde", excepciones):
-                     p_copy = p.copy(); p_copy["Rol"] += " (PARTIDO)"
-                     asig_m.append(p_copy); asig_t.append(p_copy)
-                     falta_m -= 1; falta_t -= 1
-                     score += 60 # Premio por cubrir el doble hueco
-                     logs.append(f"🔄 {dia}: {p['Nombre']} (Partido)")
 
+        # 3.2 SECUNDARIA: PARTIDOS (Doble hueco)
+        if falta_m > 0 and falta_t > 0:
+             partidos = [e for e in pool_relleno if e["Partido"] and e not in asig_m and e not in asig_t]
+             for p in partidos:
+                 if falta_m > 0 and falta_t > 0:
+                     if cumple_restricciones_duras(p, dia, "Mañana", excepciones) and cumple_restricciones_duras(p, dia, "Tarde", excepciones):
+                         p_copy = p.copy(); p_copy["Rol"] += " (PARTIDO)"
+                         asig_m.append(p_copy); asig_t.append(p_copy)
+                         falta_m -= 1; falta_t -= 1
+                         score += 40 # Menor que Extra individual, según tu preferencia
+                         logs.append(f"🔄 {dia}: {p['Nombre']} (Partido)")
+
+        # Guardar datos
         for x in asig_m: schedule.append({"Día": dia, "Turno": "Mañana", "Horario": "08:30-16:30", "Nombre": x["Nombre"], "Rol": x["Rol"]})
         for x in asig_t: schedule.append({"Día": dia, "Turno": "Tarde", "Horario": "16:00-CIERRE", "Nombre": x["Nombre"], "Rol": x["Rol"]})
         
@@ -254,7 +275,7 @@ def main():
         usar_rescate = st.sidebar.checkbox("Usar Días Libres para cubrir Roles Críticos", value=True)
         
         st.sidebar.markdown("---")
-        st.sidebar.header("🎯 Objetivos")
+        st.sidebar.header("🎯 Objetivos (Mínimo Ideal)")
         objetivos = {}
         st.sidebar.subheader("Lunes - Jueves")
         objetivos["lj_m"] = st.sidebar.slider("Mañana (L-J)", 0, 10, 3)
@@ -309,23 +330,19 @@ def main():
                     st.success(f"✅ Mejor Opción Encontrada (Puntuación: {mejor_score})")
                     schedule = mejor_resultado["schedule"]
                     
-                    # 1. Matriz
                     df_sch = pd.DataFrame(schedule)
                     matrix = df_sch.pivot_table(index="Nombre", columns="Día", values="Horario", aggfunc=lambda x: " / ".join(x))
                     matrix = matrix.reindex(df_edited["Nombre"].unique()).reindex(columns=CONFIG["DIAS"]).fillna("LIBRE")
                     def style_cells(val): return 'background-color: #ffcccc; color: #555' if "LIBRE" in str(val) else 'background-color: #e6f3ff; color: #000'
                     st.dataframe(matrix.style.map(style_cells), use_container_width=True)
                     
-                    # 2. Auditoría
                     st.subheader("🛡️ Cobertura de Roles Críticos")
                     st.dataframe(pd.DataFrame(mejor_resultado["audit"]), use_container_width=True)
 
-                    # 3. Faltantes
                     st.subheader("⚠️ Faltantes Numéricos")
                     def highlight(val): return 'color: red; font-weight: bold' if isinstance(val, (int, float)) and val > 0 else ''
                     st.dataframe(pd.DataFrame(mejor_resultado["kpis"]).style.map(highlight, subset=["Faltan Mañana", "Faltan Tarde"]), use_container_width=True)
                     
-                    # 4. Logs
                     st.markdown("---")
                     st.subheader("🔔 Registro de Incidencias")
                     if mejor_resultado["logs"]:
