@@ -55,22 +55,17 @@ def detectar_libranza_anterior(uploaded_file):
 def asignar_dias_libres_inteligente(staff_list, excepciones, libranzas_previas):
     staff_con_libres = []
     pares = CONFIG["PARES_DIAS_LIBRES"]
-    
-    # Separamos contadores por ROL para intentar que no libren todos los jefes el mismo día
     idx_rol = {"J. Cocina": 0, "Lavaplatos": 0, "Eq. General": 0}
     
     for emp in staff_list:
         nombre = emp["Nombre"]
         rol = emp["Rol"]
         emp["Dias_Libres_Asignados"] = []
-        
-        # 1. Excepciones Manuales (Prioridad Absoluta)
         dias_manuales = [x["Día"] for x in excepciones if x["Nombre"] == nombre and x["Tipo"] == "Día Libre Completo"]
         
         if dias_manuales:
             emp["Dias_Libres_Asignados"] = dias_manuales
         elif nombre in libranzas_previas:
-            # 2. Rotación Histórica
             previos = libranzas_previas[nombre]
             idx_encontrado = -1
             if len(previos) > 0:
@@ -85,10 +80,8 @@ def asignar_dias_libres_inteligente(staff_list, excepciones, libranzas_previas):
                 emp["Dias_Libres_Asignados"] = list(pares[idx_rol.get(rol, 0) % len(pares)])
                 idx_rol[rol] = idx_rol.get(rol, 0) + 1
         else:
-            # 3. Asignación Staggered (Escalonada) por Rol
             emp["Dias_Libres_Asignados"] = list(pares[idx_rol.get(rol, 0) % len(pares)])
             idx_rol[rol] = idx_rol.get(rol, 0) + 1
-            
         staff_con_libres.append(emp)
     return staff_con_libres
 
@@ -105,12 +98,11 @@ def cumple_restricciones_duras(empleado, dia, turno_nombre, excepciones):
     nombre = empleado["Nombre"]
     regla = next((x for x in excepciones if x["Nombre"] == nombre and x["Día"] == dia), None)
     
-    if not regla: return True # No hay regla manual
+    if not regla: return True 
 
     tipo = regla["Tipo"]
     hora_limite = str_to_time(regla.get("Hora", "-"))
     
-    # Si el usuario puso MANUALMENTE "Día Libre Completo", eso es sagrado.
     if tipo == "Día Libre Completo": return False
 
     inicio = str_to_time(CONFIG["TURNOS"][turno_nombre]["inicio"])
@@ -121,7 +113,6 @@ def cumple_restricciones_duras(empleado, dia, turno_nombre, excepciones):
     return True
 
 def esta_en_dia_libre(empleado, dia):
-    """Verifica si es su día libre calculado automáticamente."""
     return dia in empleado.get("Dias_Libres_Asignados", [])
 
 def generar_excel(df_matrix, df_kpis, df_audit, logs):
@@ -140,6 +131,15 @@ def main():
     try:
         st.sidebar.header("📂 Gestión")
         archivo = st.sidebar.file_uploader("Cargar Horario Anterior", type=["xlsx"])
+        
+        # --- NUEVO CONTROL: ACTIVAR/DESACTIVAR RESCATE ---
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🚨 Reglas de Emergencia")
+        usar_rescate = st.sidebar.checkbox(
+            "Usar Días Libres para cubrir Roles Críticos", 
+            value=True,
+            help="Si se activa, el sistema asignará turno a un Jefe/Lavaplatos en su día libre si no hay nadie más. Si se desactiva, dejará el puesto vacío."
+        )
         
         st.sidebar.markdown("---")
         st.sidebar.header("🎯 Objetivos")
@@ -179,11 +179,9 @@ def main():
                 staff_raw = df_edited[df_edited["Activo"]==True].to_dict('records')
                 excepciones = st.session_state.excepciones
                 historial = detectar_libranza_anterior(archivo)
-                
-                # 2. Asignar Días Libres (Intento Inicial)
                 staff_pool = asignar_dias_libres_inteligente(staff_raw, excepciones, historial)
 
-                # 3. BUCLE DE GENERACIÓN DIARIA
+                # 2. BUCLE DIARIO
                 for dia in CONFIG["DIAS"]:
                     es_finde = dia in ["Viernes", "Sábado", "Domingo"]
                     meta_m = vd_m if es_finde else lj_m
@@ -191,49 +189,46 @@ def main():
                     
                     asig_m, asig_t = [], []
                     
-                    # --- FASE 0: Definir Grupos de Disponibilidad ---
-                    # Grupo A: Disponibles (No es su día libre + Cumple reglas duras)
+                    # Definir Grupos
                     grupo_a = [e for e in staff_pool if not esta_en_dia_libre(e, dia) and cumple_restricciones_duras(e, dia, "Mañana", excepciones)]
                     
-                    # Grupo B: En Día Libre (Es su día libre calculado + Cumple reglas duras). RESERVA DE EMERGENCIA.
-                    grupo_b = [e for e in staff_pool if esta_en_dia_libre(e, dia) and cumple_restricciones_duras(e, dia, "Mañana", excepciones)]
-
-                    # --- FASE 1: ROLES CRÍTICOS (PRIORIDAD MAXIMA) ---
+                    # --- FASE 1: ROLES CRÍTICOS ---
                     for rol in CONFIG["ROLES_CRITICOS"]:
-                        # -- MAÑANA --
-                        # 1. Intentar con Grupo A (Gente que le toca trabajar)
+                        # MAÑANA
                         cand = next((c for c in grupo_a if c["Rol"] == rol and c not in asig_m + asig_t and cumple_restricciones_duras(c, dia, "Mañana", excepciones)), None)
-                        
                         if cand:
                             asig_m.append(cand)
                         else:
-                            # 2. EMERGENCIA: Buscar en Grupo B (Gente que libraba hoy)
-                            # Filtramos el pool completo buscando alguien de este rol que cumpla restricciones duras
-                            cand_rescue = next((c for c in staff_pool if c["Rol"] == rol and c not in asig_m + asig_t and cumple_restricciones_duras(c, dia, "Mañana", excepciones)), None)
-                            
-                            if cand_rescue:
-                                asig_m.append(cand_rescue)
-                                logs.append(f"🚨 {dia} (Mañana): {cand_rescue['Nombre']} recuperado de su día libre para cubrir {rol}.")
+                            # --- LÓGICA CONDICIONAL DE RESCATE ---
+                            if usar_rescate:
+                                cand_rescue = next((c for c in staff_pool if c["Rol"] == rol and c not in asig_m + asig_t and cumple_restricciones_duras(c, dia, "Mañana", excepciones)), None)
+                                if cand_rescue:
+                                    asig_m.append(cand_rescue)
+                                    logs.append(f"🚨 {dia} (Mañana): {cand_rescue['Nombre']} recuperado (Día Libre) para cubrir {rol}.")
+                                else:
+                                    logs.append(f"❌ {dia} (Mañana): IMPOSIBLE cubrir {rol}.")
                             else:
-                                logs.append(f"❌ {dia} (Mañana): IMPOSIBLE cubrir {rol}. Nadie disponible.")
+                                logs.append(f"❌ {dia} (Mañana): {rol} vacante (Rescate desactivado).")
 
-                        # -- TARDE -- (Misma lógica)
-                        # Recalcular disponibles (algunos ya entraron en Mañana)
-                        cand_t = next((c for c in staff_pool if c["Rol"] == rol and c not in asig_m + asig_t and not esta_en_dia_libre(c, dia) and cumple_restricciones_duras(c, dia, "Tarde", excepciones)), None)
+                        # TARDE (Recalcular disponibles)
+                        # Grupo A Tarde (gente que le toca trabajar y cumple horario tarde)
+                        grupo_a_t = [e for e in staff_pool if not esta_en_dia_libre(e, dia) and cumple_restricciones_duras(e, dia, "Tarde", excepciones)]
                         
+                        cand_t = next((c for c in grupo_a_t if c["Rol"] == rol and c not in asig_m + asig_t), None)
                         if cand_t:
                             asig_t.append(cand_t)
                         else:
-                            # Emergencia Tarde
-                            cand_rescue_t = next((c for c in staff_pool if c["Rol"] == rol and c not in asig_m + asig_t and cumple_restricciones_duras(c, dia, "Tarde", excepciones)), None)
-                            if cand_rescue_t:
-                                asig_t.append(cand_rescue_t)
-                                logs.append(f"🚨 {dia} (Tarde): {cand_rescue_t['Nombre']} recuperado de su día libre para cubrir {rol}.")
+                            if usar_rescate:
+                                cand_rescue_t = next((c for c in staff_pool if c["Rol"] == rol and c not in asig_m + asig_t and cumple_restricciones_duras(c, dia, "Tarde", excepciones)), None)
+                                if cand_rescue_t:
+                                    asig_t.append(cand_rescue_t)
+                                    logs.append(f"🚨 {dia} (Tarde): {cand_rescue_t['Nombre']} recuperado (Día Libre) para cubrir {rol}.")
+                                else:
+                                    logs.append(f"❌ {dia} (Tarde): IMPOSIBLE cubrir {rol}.")
                             else:
-                                logs.append(f"❌ {dia} (Tarde): IMPOSIBLE cubrir {rol}.")
+                                logs.append(f"❌ {dia} (Tarde): {rol} vacante (Rescate desactivado).")
 
-                    # --- FASE 2: RELLENO GENERAL (Solo gente que le toca trabajar) ---
-                    # Aquí NO usamos emergencia. Si falta gente, falta. Solo rompemos reglas para Jefes/Lavas.
+                    # --- FASE 2: RELLENO GENERAL ---
                     pool_relleno = [e for e in staff_pool if not esta_en_dia_libre(e, dia)]
                     
                     while len(asig_m) < meta_m:
@@ -246,8 +241,7 @@ def main():
                         if cand: asig_t.append(cand)
                         else: break
 
-                    # --- FASE 3: DÉFICIT (Extras y Partidos) ---
-                    # Solo tiramos de extras si faltan números (no roles críticos, esos ya están cubiertos o fallidos)
+                    # --- FASE 3: DÉFICIT ---
                     falta_m, falta_t = meta_m - len(asig_m), meta_t - len(asig_t)
                     
                     if falta_m > 0 or falta_t > 0:
@@ -268,16 +262,15 @@ def main():
 
                 # --- VISUALIZACIÓN ---
                 if schedule:
-                    st.success("✅ Horario Generado (Priorizando Roles Críticos)")
+                    st.success("✅ Horario Calculado")
                     
-                    # 1. Matriz
                     df_sch = pd.DataFrame(schedule)
                     matrix = df_sch.pivot_table(index="Nombre", columns="Día", values="Horario", aggfunc=lambda x: " / ".join(x))
                     matrix = matrix.reindex(df_edited["Nombre"].unique()).reindex(columns=CONFIG["DIAS"]).fillna("LIBRE")
                     def style_cells(val): return 'background-color: #ffcccc; color: #555' if "LIBRE" in str(val) else 'background-color: #e6f3ff; color: #000'
                     st.dataframe(matrix.style.map(style_cells), use_container_width=True)
                     
-                    # 2. Auditoría Roles
+                    # Auditoría Roles
                     st.subheader("🛡️ Auditoría de Roles Críticos")
                     audit_data = []
                     for dia in CONFIG["DIAS"]:
@@ -293,14 +286,25 @@ def main():
                         })
                     st.dataframe(pd.DataFrame(audit_data), use_container_width=True)
 
-                    # 3. Faltantes Numéricos
+                    # Faltantes
                     st.subheader("⚠️ Faltantes Numéricos")
                     def highlight(val): return 'color: red; font-weight: bold' if isinstance(val, (int, float)) and val > 0 else ''
                     st.dataframe(pd.DataFrame(kpis_simples).style.map(highlight, subset=["Faltan Mañana", "Faltan Tarde"]), use_container_width=True)
                     
-                    # 4. Descarga
+                    # Alertas en pantalla
+                    st.markdown("---")
+                    st.subheader("🔔 Registro de Incidencias")
+                    if logs:
+                        for log in logs:
+                            if "🚨" in log: st.error(log)
+                            elif "⚠️" in log: st.warning(log)
+                            elif "❌" in log: st.error(log)
+                            else: st.info(log)
+                    else: st.success("Sin incidencias.")
+
+                    # Descarga
                     excel = generar_excel(matrix, pd.DataFrame(kpis_simples), pd.DataFrame(audit_data), logs)
-                    st.download_button("📥 Excel", excel, "horario.xlsx")
+                    st.download_button("📥 Descargar Excel", excel, "horario.xlsx")
 
     except Exception as e:
         st.error("Error:"); st.exception(e)
